@@ -7,7 +7,11 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
-def main_menu_kb(is_admin: bool = False, show_trial: bool = False) -> InlineKeyboardMarkup:
+def main_menu_kb(
+    is_admin: bool = False,
+    show_trial: bool = False,
+    support_link: str = "https://t.me/q1vpn_support"
+) -> InlineKeyboardMarkup:
     """
     Главное меню пользователя.
     
@@ -19,7 +23,11 @@ def main_menu_kb(is_admin: bool = False, show_trial: bool = False) -> InlineKeyb
     
     # Основные кнопки
     builder.row(
-        InlineKeyboardButton(text="🔑 Мои ключи", callback_data="my_keys"),
+        InlineKeyboardButton(text="👤 Личный кабинет", callback_data="cabinet"),
+        InlineKeyboardButton(text="🔑 Мои ключи", callback_data="my_keys")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🤝 Реферальная система", callback_data="referrals"),
         InlineKeyboardButton(text="💳 Купить ключ", callback_data="buy_key")
     )
     
@@ -32,6 +40,9 @@ def main_menu_kb(is_admin: bool = False, show_trial: bool = False) -> InlineKeyb
     builder.row(
         InlineKeyboardButton(text="❓ Справка", callback_data="help")
     )
+    builder.row(
+        InlineKeyboardButton(text="💬 Поддержка", url=support_link)
+    )
     
     # Кнопка админ-панели (только для админов)
     if is_admin:
@@ -41,6 +52,22 @@ def main_menu_kb(is_admin: bool = False, show_trial: bool = False) -> InlineKeyb
     
     return builder.as_markup()
 
+
+def referrals_kb(referral_link: str) -> InlineKeyboardMarkup:
+    """Клавиатура реферальной системы."""
+    builder = InlineKeyboardBuilder()
+    share_text = (
+        "Подключайся к q1 vpn по моей ссылке:\n"
+        f"{referral_link}\n\n"
+        "За пробный период получим бонусные дни."
+    )
+    builder.row(
+        InlineKeyboardButton(text="📤 Поделиться", switch_inline_query=share_text)
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="start")
+    )
+    return builder.as_markup()
 
 
 def help_kb(news_link: str, support_link: str) -> InlineKeyboardMarkup:
@@ -669,4 +696,3 @@ def qr_tariff_select_kb(tariffs: list) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🈴 На главную", callback_data="start")
     )
     return builder.as_markup()
-

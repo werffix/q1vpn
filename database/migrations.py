@@ -11,7 +11,7 @@ from .connection import get_db
 logger = logging.getLogger(__name__)
 
 # Текущая версия схемы БД
-LATEST_VERSION = 8
+LATEST_VERSION = 9
 
 
 def get_current_version() -> int:
@@ -89,8 +89,7 @@ def migration_1(conn: sqlite3.Connection) -> None:
 Продлите подписку, чтобы сохранить доступ к VPN без перерыва!'''),
         ('main_page_text', (
             "⚡️q1 vpn \\- быстрый, безопасный и анонимный доступ к интернету\\.\n\n"
-            "🏦 Ваш баланс:  ₽ \\( дней\\)\\.\n"
-            "🌐 Использование трафика: ГБ\n\n"
+            "🌐 Использование трафика: %traffic_used_gb% ГБ\n\n"
             "%без\\_тарифов%"
         )),
         ('help_page_text', (
@@ -478,6 +477,45 @@ def migration_8(conn: sqlite3.Connection) -> None:
     logger.info("Миграция v8 применена")
 
 
+def migration_9(conn: sqlite3.Connection) -> None:
+    """
+    Миграция v9: Реферальная система и новый шаблон главной страницы.
+    """
+    logger.info("Применение миграции v9 (Реферальная система)...")
+
+    # Поля реферальной системы
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e):
+            raise
+
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN referral_days_earned INTEGER DEFAULT 0")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e):
+            raise
+
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN referred_reward_granted INTEGER DEFAULT 0")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e):
+            raise
+
+    # Новый текст главной страницы
+    main_page_text = (
+        "⚡️q1 vpn \\- быстрый, безопасный и анонимный доступ к интернету\\.\n\n"
+        "🌐 Использование трафика: %traffic_used_gb% ГБ\n\n"
+        "%без\\_тарифов%"
+    )
+    conn.execute(
+        "UPDATE settings SET value = ? WHERE key = 'main_page_text'",
+        (main_page_text,)
+    )
+
+    logger.info("Миграция v9 применена")
+
+
 MIGRATIONS = {
     1: migration_1,
     2: migration_2,
@@ -487,6 +525,7 @@ MIGRATIONS = {
     6: migration_6,
     7: migration_7,
     8: migration_8,
+    9: migration_9,
 }
 
 

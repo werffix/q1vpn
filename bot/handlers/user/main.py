@@ -7,6 +7,7 @@ import logging
 import uuid
 import asyncio
 from datetime import datetime
+from typing import Optional, Dict, Any
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, CommandObject, StateFilter
@@ -28,7 +29,51 @@ router = Router()
 # КОМАНДА /START
 # ============================================================================
 
-def get_welcome_text(is_admin: bool = False) -> str:
+async def _get_primary_key_traffic(telegram_id: int) -> Dict[str, Any]:
+    """Возвращает статистику трафика по основному ключу пользователя."""
+    from database.requests import get_user_primary_key_for_profile
+    from bot.services.vpn_api import get_client, format_traffic
+
+    info = {
+        'used_bytes': 0,
+        'total_bytes': 0,
+        'used_human': "0 GB",
+        'total_human': "0 GB",
+    }
+
+    key = get_user_primary_key_for_profile(telegram_id)
+    if not key:
+        return info
+
+    if not key.get('server_id') or not key.get('panel_email'):
+        return info
+
+    try:
+        client = await get_client(key['server_id'])
+        stats = await client.get_client_stats(key['panel_email'])
+        if not stats:
+            return info
+
+        used_bytes = stats.get('up', 0) + stats.get('down', 0)
+        total_bytes = stats.get('total', 0)
+        info['used_bytes'] = used_bytes
+        info['total_bytes'] = total_bytes
+        info['used_human'] = format_traffic(used_bytes)
+        info['total_human'] = format_traffic(total_bytes) if total_bytes > 0 else "Безлимит"
+    except Exception as e:
+        logger.warning(f"Не удалось получить трафик для стартового экрана user={telegram_id}: {e}")
+
+    return info
+
+
+def _format_gb_value(used_bytes: int) -> str:
+    gb_value = used_bytes / (1024 ** 3)
+    if gb_value < 0.01:
+        return "0"
+    return f"{gb_value:.2f}".rstrip('0').rstrip('.')
+
+
+async def get_welcome_text(telegram_id: int, is_admin: bool = False) -> str:
     """Формирует приветственный текст с реальными тарифами из БД."""
     from database.requests import (
         get_all_tariffs, get_setting, 
@@ -41,11 +86,14 @@ def get_welcome_text(is_admin: bool = False) -> str:
         'main_page_text',
         (
             "⚡️q1 vpn \\- быстрый, безопасный и анонимный доступ к интернету\\.\n\n"
-            "🏦 Ваш баланс:  ₽ \\( дней\\)\\.\n"
-            "🌐 Использование трафика: ГБ\n\n"
+            "🌐 Использование трафика: %traffic_used_gb% ГБ\n\n"
             "%без\\_тарифов%"
         )
     )
+
+    traffic_info = await _get_primary_key_traffic(telegram_id)
+    used_gb_str = _format_gb_value(traffic_info['used_bytes'])
+    welcome_text = welcome_text.replace("%traffic_used_gb%", escape_md2(used_gb_str))
     
     # Получаем настройки оплат
     crypto_enabled = is_crypto_configured()
@@ -120,10 +168,22 @@ async def cmd_start(message: Message, state: FSMContext, command: CommandObject)
     # Проверяем админа
     is_admin = user_id in ADMIN_IDS
     
-    text = get_welcome_text(is_admin)
+    # Deep-link реферальной системы: /start <telegram_id> или /start ref_<telegram_id>
+    args = (command.args or "").strip()
+    if args and not args.startswith("bill"):
+        from database.requests import set_referrer_if_possible
+        ref_tg_id: Optional[int] = None
+        if args.isdigit():
+            ref_tg_id = int(args)
+        elif args.startswith("ref_") and args[4:].isdigit():
+            ref_tg_id = int(args[4:])
+
+        if ref_tg_id:
+            set_referrer_if_possible(user_id, ref_tg_id)
+
+    text = await get_welcome_text(user_id, is_admin)
     
     # Проверяем аргументы запуска (deep linking)
-    args = command.args
     if args and args.startswith("bill"):
         from bot.services.billing import process_crypto_payment
         from bot.handlers.user.payments import finalize_payment_ui
@@ -157,17 +217,18 @@ async def cmd_start(message: Message, state: FSMContext, command: CommandObject)
         return
 
     # Вычисляем, показывать ли кнопку пробной подписки
-    from database.requests import is_trial_enabled, get_trial_tariff_id, has_used_trial
+    from database.requests import is_trial_enabled, get_trial_tariff_id, has_used_trial, get_setting
     show_trial = (
         is_trial_enabled() and
         get_trial_tariff_id() is not None and
         not has_used_trial(user_id)
     )
+    support_link = get_setting('support_channel_link', 'https://t.me/q1vpn_support')
 
     try:
         await message.answer(
             text,
-            reply_markup=main_menu_kb(is_admin=is_admin, show_trial=show_trial),
+            reply_markup=main_menu_kb(is_admin=is_admin, show_trial=show_trial, support_link=support_link),
             parse_mode="MarkdownV2"
         )
     except TelegramForbiddenError:
@@ -193,22 +254,23 @@ async def callback_start(callback: CallbackQuery, state: FSMContext):
     # Проверяем админа
     is_admin = user_id in ADMIN_IDS
     
-    text = get_welcome_text(is_admin)
+    text = await get_welcome_text(user_id, is_admin)
 
     # Вычисляем, показывать ли кнопку пробной подписки
-    from database.requests import is_trial_enabled, get_trial_tariff_id, has_used_trial
+    from database.requests import is_trial_enabled, get_trial_tariff_id, has_used_trial, get_setting
     show_trial = (
         is_trial_enabled() and
         get_trial_tariff_id() is not None and
         not has_used_trial(user_id)
     )
+    support_link = get_setting('support_channel_link', 'https://t.me/q1vpn_support')
     
     # Пытаемся отредактировать сообщение (если текст)
     # Если это фото/файл (после выдачи ключа), edit_text упадёт.
     try:
         await callback.message.edit_text(
             text,
-            reply_markup=main_menu_kb(is_admin=is_admin, show_trial=show_trial),
+            reply_markup=main_menu_kb(is_admin=is_admin, show_trial=show_trial, support_link=support_link),
             parse_mode="MarkdownV2"
         )
     except Exception:
@@ -219,7 +281,7 @@ async def callback_start(callback: CallbackQuery, state: FSMContext):
             pass
         await callback.message.answer(
             text,
-            reply_markup=main_menu_kb(is_admin=is_admin, show_trial=show_trial),
+            reply_markup=main_menu_kb(is_admin=is_admin, show_trial=show_trial, support_link=support_link),
             parse_mode="MarkdownV2"
         )
 
@@ -271,6 +333,7 @@ async def activate_trial_subscription(callback: CallbackQuery, state: FSMContext
     from database.requests import (
         is_trial_enabled, get_trial_tariff_id, has_used_trial, get_tariff_by_id,
         get_or_create_user, mark_trial_used, create_initial_vpn_key,
+        apply_referral_reward_for_trial,
         create_pending_order, complete_order
     )
     from bot.handlers.user.payments import start_new_key_config
@@ -303,6 +366,7 @@ async def activate_trial_subscription(callback: CallbackQuery, state: FSMContext
 
     # Ставим флаг пробного периода
     mark_trial_used(internal_user_id)
+    apply_referral_reward_for_trial(internal_user_id, reward_days=7)
     logger.info(
         f"Пользователь {user_id} активировал пробный период (tарифf ID={tariff_id})"
     )
@@ -375,9 +439,115 @@ async def cmd_help(message: Message, state: FSMContext):
     await show_help(message.answer)
 
 
+@router.message(Command("cabinet"))
+async def cmd_cabinet(message: Message, state: FSMContext):
+    """Обработчик /cabinet."""
+    if is_user_banned(message.from_user.id):
+        await message.answer(
+            "⛔ *Доступ заблокирован*\n\n"
+            "Ваш аккаунт заблокирован. Обратитесь в поддержку.",
+            parse_mode="Markdown"
+        )
+        return
+    await state.clear()
+    await show_cabinet(message.from_user.id, message.answer)
+
+
+@router.message(Command("referrals"))
+async def cmd_referrals(message: Message, state: FSMContext):
+    """Обработчик /referrals."""
+    if is_user_banned(message.from_user.id):
+        await message.answer(
+            "⛔ *Доступ заблокирован*\n\n"
+            "Ваш аккаунт заблокирован. Обратитесь в поддержку.",
+            parse_mode="Markdown"
+        )
+        return
+    await state.clear()
+    await show_referrals(message.from_user.id, message.bot, message.answer)
+
+
+@router.message(Command("support"))
+async def cmd_support(message: Message, state: FSMContext):
+    """Обработчик /support."""
+    from database.requests import get_setting
+    from bot.keyboards.user import support_kb
+    if is_user_banned(message.from_user.id):
+        await message.answer(
+            "⛔ *Доступ заблокирован*\n\n"
+            "Ваш аккаунт заблокирован. Обратитесь в поддержку.",
+            parse_mode="Markdown"
+        )
+        return
+    await state.clear()
+    support_link = get_setting('support_channel_link', 'https://t.me/q1vpn_support')
+    await message.answer("💬 Поддержка", reply_markup=support_kb(support_link))
+
+
 # ============================================================================
 # РАЗДЕЛ «МОИ КЛЮЧИ»
 # ============================================================================
+
+async def show_cabinet(telegram_id: int, send_function):
+    """Показывает личный кабинет пользователя."""
+    from database.requests import get_user_primary_key_for_profile
+    from bot.keyboards.admin import home_only_kb
+
+    key = get_user_primary_key_for_profile(telegram_id)
+    if not key:
+        await send_function(
+            "👤 Личный кабинет\n\n"
+            "🔎 Информация о подписке:\n"
+            "├ Текущий план: —\n"
+            "├ Дата начала: —\n"
+            "├ Дата окончания: —\n"
+            "└ Лимит устройств: 1\n\n"
+            "🛩 Использование трафика:\n"
+            "0 GB из 0 GB",
+            reply_markup=home_only_kb()
+        )
+        return
+
+    traffic = await _get_primary_key_traffic(telegram_id)
+    plan = key.get('tariff_name') or "—"
+    start_date = (key.get('created_at') or "—")[:10]
+    end_date = (key.get('expires_at') or "—")[:10]
+
+    await send_function(
+        "👤 Личный кабинет\n\n"
+        "🔎 Информация о подписке:\n"
+        f"├ Текущий план: {plan}\n"
+        f"├ Дата начала: {start_date}\n"
+        f"├ Дата окончания: {end_date}\n"
+        "└ Лимит устройств: 1\n\n"
+        "🛩 Использование трафика:\n"
+        f"{traffic['used_human']} из {traffic['total_human']}",
+        reply_markup=home_only_kb()
+    )
+
+
+async def show_referrals(telegram_id: int, bot, send_function):
+    """Показывает страницу реферальной системы."""
+    from database.requests import get_referral_stats
+    from bot.keyboards.user import referrals_kb
+
+    stats = get_referral_stats(telegram_id)
+    bot_username = getattr(bot, 'my_username', None)
+    if not bot_username:
+        me = await bot.get_me()
+        bot_username = me.username
+
+    ref_link = f"https://t.me/{bot_username}?start={telegram_id}"
+    text = (
+        f"👤 Приглашено рефералов: {stats['invited_total']}\n"
+        f"✅ Оформили подписку: {stats['trial_activated_total']}\n"
+        f"💰 Заработано дней на рефералах: {stats['earned_days']}\n"
+        f"⚙️ Ваша реф. ссылка: {ref_link}\n\n"
+        "🗣 За каждого приведенного пользователя Вы получите 7 дня подписки, "
+        "а Ваш друг - пробный период в 7 дней\n\n"
+        "Дни начисляются сразу как реферал оформит пробный период"
+    )
+    await send_function(text, reply_markup=referrals_kb(ref_link))
 
 async def show_my_keys(telegram_id: int, send_function):
     """
@@ -525,6 +695,34 @@ async def help_handler(callback: CallbackQuery):
             pass
         await show_help(callback.message.answer)
     
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cabinet")
+async def cabinet_handler(callback: CallbackQuery):
+    """Показывает личный кабинет по кнопке."""
+    try:
+        await show_cabinet(callback.from_user.id, callback.message.edit_text)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await show_cabinet(callback.from_user.id, callback.message.answer)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "referrals")
+async def referrals_handler(callback: CallbackQuery):
+    """Показывает реферальную систему по кнопке."""
+    try:
+        await show_referrals(callback.from_user.id, callback.bot, callback.message.edit_text)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await show_referrals(callback.from_user.id, callback.bot, callback.message.answer)
     await callback.answer()
 
 
