@@ -55,9 +55,12 @@ async def send_key_with_qr(
 
         # 2. Генерируем данные
         logger.info(f"Generating key for {key_data.get('panel_email')} (protocol: {config.get('protocol', 'vless')})")
-        link = generate_link(config)
-            
-        json_config = generate_json(config)
+        # Единое отображаемое имя в клиентах
+        config_for_client = dict(config)
+        config_for_client['inbound_name'] = "q1 vpn"
+
+        link = generate_link(config_for_client)
+        json_config = generate_json(config_for_client)
         qr_bytes = generate_qr_code(link)
         
         # 3. Формируем сообщение

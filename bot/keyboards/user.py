@@ -30,6 +30,9 @@ def main_menu_kb(
         InlineKeyboardButton(text="🤝 Реферальная система", callback_data="referrals"),
         InlineKeyboardButton(text="💳 Купить ключ", callback_data="buy_key")
     )
+    builder.row(
+        InlineKeyboardButton(text="📡 Подписка", callback_data="subscription")
+    )
     
     # Кнопка «Пробная подписка» (над Справкой, если доступна)
     if show_trial:

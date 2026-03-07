@@ -484,6 +484,20 @@ async def cmd_support(message: Message, state: FSMContext):
     await message.answer("💬 Поддержка", reply_markup=support_kb(support_link))
 
 
+@router.message(Command("subscription"))
+async def cmd_subscription(message: Message, state: FSMContext):
+    """Обработчик /subscription."""
+    if is_user_banned(message.from_user.id):
+        await message.answer(
+            "⛔ *Доступ заблокирован*\n\n"
+            "Ваш аккаунт заблокирован. Обратитесь в поддержку.",
+            parse_mode="Markdown"
+        )
+        return
+    await state.clear()
+    await show_subscription_bundle(message.from_user.id, message.answer)
+
+
 # ============================================================================
 # РАЗДЕЛ «МОИ КЛЮЧИ»
 # ============================================================================
@@ -548,6 +562,89 @@ async def show_referrals(telegram_id: int, bot, send_function):
         "Дни начисляются сразу как реферал оформит пробный период"
     )
     await send_function(text, reply_markup=referrals_kb(ref_link))
+
+
+async def show_subscription_bundle(telegram_id: int, send_function):
+    """
+    Отдаёт пользователю subscription-ссылки и subscription-ответ (base64 со списком всех серверов).
+    """
+    import base64
+    from database.requests import get_user_keys_for_subscription, get_user_primary_key_for_profile
+    from bot.services.vpn_api import get_client
+    from bot.utils.key_generator import generate_link
+    from bot.keyboards.admin import home_only_kb
+
+    keys = get_user_keys_for_subscription(telegram_id)
+    if not keys:
+        await send_function(
+            "📡 Подписка пока недоступна: у вас нет активированных ключей.",
+            reply_markup=home_only_kb()
+        )
+        return
+
+    links: List[str] = []
+    sub_urls: List[str] = []
+    server_names: List[str] = []
+
+    for key in keys:
+        if not key.get('server_id') or not key.get('panel_email'):
+            continue
+
+        try:
+            client = await get_client(key['server_id'])
+            config = await client.get_client_config(key['panel_email'])
+            if not config:
+                continue
+
+            # Название подключения для клиентов
+            config['inbound_name'] = "q1 vpn"
+            links.append(generate_link(config))
+
+            sub_id = config.get('sub_id')
+            if sub_id and key.get('host') and key.get('port'):
+                protocol = key.get('protocol') or 'https'
+                base_path = (key.get('web_base_path') or '').strip('/')
+                path_prefix = f"/{base_path}" if base_path else ""
+                sub_urls.append(f"{protocol}://{key['host']}:{key['port']}{path_prefix}/sub/{sub_id}")
+
+            if key.get('server_name'):
+                server_names.append(str(key['server_name']))
+        except Exception as e:
+            logger.warning(f"Не удалось собрать подписку для key={key.get('id')}: {e}")
+
+    if not links:
+        await send_function(
+            "📡 Не удалось подготовить подписку. Проверьте доступность серверов.",
+            reply_markup=home_only_kb()
+        )
+        return
+
+    primary = get_user_primary_key_for_profile(telegram_id)
+    traffic = await _get_primary_key_traffic(telegram_id)
+    expires_at = ((primary or {}).get('expires_at') or "—")[:10]
+
+    # Универсальный subscription-ответ для импорта из буфера
+    raw_response = "\n".join(links)
+    encoded_response = base64.b64encode(raw_response.encode('utf-8')).decode('utf-8')
+
+    description = "⚡ Быстрое соединение\n🔒 Полная приватность\n\nБот: @q1vpn_vot"
+    servers_text = ", ".join(sorted(set(server_names))) if server_names else "—"
+    first_sub_url = sub_urls[0] if sub_urls else "—"
+
+    text = (
+        "📡 *Подписка q1 vpn*\n\n"
+        f"• Название: q1 vpn\n"
+        f"• Расход трафика: {traffic['used_human']}\n"
+        f"• Лимит трафика: {traffic['total_human']}\n"
+        f"• Дата окончания: {expires_at}\n\n"
+        f"{description}\n\n"
+        f"• Список серверов: {servers_text}\n\n"
+        f"*Subscription URL:* `{first_sub_url}`\n\n"
+        "*Subscription response (base64):*\n"
+        f"`{encoded_response}`"
+    )
+
+    await send_function(text, reply_markup=home_only_kb(), parse_mode="Markdown")
 
 async def show_my_keys(telegram_id: int, send_function):
     """
@@ -723,6 +820,20 @@ async def referrals_handler(callback: CallbackQuery):
         except Exception:
             pass
         await show_referrals(callback.from_user.id, callback.bot, callback.message.answer)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "subscription")
+async def subscription_handler(callback: CallbackQuery):
+    """Показывает подписку по кнопке."""
+    try:
+        await show_subscription_bundle(callback.from_user.id, callback.message.edit_text)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await show_subscription_bundle(callback.from_user.id, callback.message.answer)
     await callback.answer()
 
 

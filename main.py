@@ -62,6 +62,7 @@ async def on_startup(bot: Bot):
     await bot.set_my_commands([
         BotCommand(command="cabinet", description="Личный кабинет"),
         BotCommand(command="mykeys", description="Мои ключи"),
+        BotCommand(command="subscription", description="Подписка"),
         BotCommand(command="referrals", description="Реферальная система"),
         BotCommand(command="support", description="Поддержка"),
         BotCommand(command="start", description="Главное меню"),

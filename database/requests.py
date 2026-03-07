@@ -625,6 +625,31 @@ def get_user_primary_key_for_profile(telegram_id: int) -> Optional[Dict[str, Any
         return dict(row) if row else None
 
 
+def get_user_keys_for_subscription(telegram_id: int) -> List[Dict[str, Any]]:
+    """
+    Возвращает ключи пользователя с данными серверов для формирования подписки.
+    """
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT
+                vk.id,
+                vk.panel_email,
+                vk.expires_at,
+                vk.server_id,
+                s.name AS server_name,
+                s.host,
+                s.port,
+                s.web_base_path,
+                s.protocol
+            FROM vpn_keys vk
+            JOIN users u ON u.id = vk.user_id
+            LEFT JOIN servers s ON s.id = vk.server_id
+            WHERE u.telegram_id = ?
+            ORDER BY vk.expires_at DESC
+        """, (telegram_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+
 # ============================================================================
 # ТАРИФЫ (tariffs)
 # ============================================================================
