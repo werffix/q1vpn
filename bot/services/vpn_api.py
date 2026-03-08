@@ -358,7 +358,7 @@ class XUIClient:
         email: str,
         total_gb: int = 0,
         expire_days: int = 30,
-        limit_ip: int = 1,
+        limit_ip: int = 3,
         enable: bool = True,
         tg_id: str = "",
         flow: str = ""
@@ -371,7 +371,7 @@ class XUIClient:
             email: Уникальный идентификатор клиента (используем user_{id})
             total_gb: Лимит трафика в ГБ (0 = без лимита)
             expire_days: Срок действия в днях (0 = бессрочно)
-            limit_ip: Ограничение по IP (1 = 1 устройство)
+            limit_ip: Ограничение по IP (по умолчанию 3 устройства)
             enable: Активен ли клиент
             tg_id: Telegram ID для уведомлений панели
             flow: Параметр flow (напр. 'xtls-rprx-vision' для VLESS Reality/TLS TCP)
@@ -590,7 +590,8 @@ class XUIClient:
                 clients = settings.get('clients', [])
                 
                 for client in clients:
-                    if client.get('id') == client_uuid:
+                    identifier = client.get('id') or client.get('password') or client.get('email')
+                    if identifier in (client_uuid, email):
                         target_client = client
                         break
                 break
@@ -621,9 +622,88 @@ class XUIClient:
             })
         }
         
-        await self._request("POST", f"/panel/api/inbounds/updateClient/{client_uuid}", data=update_data)
+        client_key = target_client.get('id') or target_client.get('password') or client_uuid
+        await self._request("POST", f"/panel/api/inbounds/updateClient/{client_key}", data=update_data)
         logger.info(f"Обновлен лимит трафика клиента {email}: {total_gb} ГБ")
         return True
+
+    async def update_client_limit_ip(
+        self,
+        inbound_id: int,
+        client_uuid: str,
+        email: str,
+        limit_ip: int
+    ) -> bool:
+        """
+        Обновляет лимит устройств (limitIp) существующего клиента.
+        """
+        inbounds = await self.get_inbounds()
+        target_inbound = None
+        target_client = None
+
+        for inbound in inbounds:
+            if inbound.get('id') == inbound_id:
+                target_inbound = inbound
+                settings = json.loads(inbound.get('settings', '{}'))
+                for client in settings.get('clients', []):
+                    identifier = client.get('id') or client.get('password') or client.get('email')
+                    if identifier in (client_uuid, email):
+                        target_client = client
+                        break
+                break
+
+        if not target_inbound or not target_client:
+            raise VPNAPIError(f"Клиент {email} не найден в inbound {inbound_id}")
+
+        target_client['limitIp'] = limit_ip
+        update_data = {
+            "id": inbound_id,
+            "settings": json.dumps({
+                "clients": [target_client]
+            })
+        }
+        client_key = target_client.get('id') or target_client.get('password') or client_uuid
+        await self._request("POST", f"/panel/api/inbounds/updateClient/{client_key}", data=update_data)
+        logger.info(f"Обновлен limitIp клиента {email}: {limit_ip}")
+        return True
+
+    async def get_client_online_ips(self, email: str) -> List[str]:
+        """
+        Возвращает список IP активных подключений клиента.
+        """
+        endpoints = [
+            f"/panel/api/inbounds/clientIps/{email}",
+            f"/panel/api/inbounds/getClientIps/{email}",
+        ]
+        for endpoint in endpoints:
+            try:
+                res = await self._request("POST", endpoint, retry=False, log_error=False)
+                obj = res.get("obj")
+                if isinstance(obj, list):
+                    return [str(v) for v in obj if v]
+                if isinstance(obj, dict):
+                    return [str(k) for k in obj.keys() if k]
+                if isinstance(obj, str) and obj:
+                    return [obj]
+            except Exception:
+                continue
+        return []
+
+    async def clear_client_online_ips(self, email: str) -> bool:
+        """
+        Сбрасывает активные IP/сессии клиента.
+        """
+        endpoints = [
+            f"/panel/api/inbounds/clearClientIps/{email}",
+            f"/panel/api/inbounds/resetClientIp/{email}",
+        ]
+        for endpoint in endpoints:
+            try:
+                await self._request("POST", endpoint, retry=False, log_error=False)
+                return True
+            except Exception:
+                continue
+        raise VPNAPIError("Не удалось сбросить активные устройства")
 
     async def get_client_config(self, email: str) -> Optional[Dict[str, Any]]:
         """

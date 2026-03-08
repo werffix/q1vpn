@@ -481,6 +481,233 @@ def mark_trial_used(user_id: int) -> None:
         logger.info(f"Пользователь ID {user_id} использовал пробный период")
 
 
+def set_referrer_if_possible(telegram_id: int, referrer_telegram_id: int) -> bool:
+    """
+    Привязывает реферера пользователю один раз (если еще не привязан).
+    """
+    if telegram_id == referrer_telegram_id:
+        return False
+
+    with get_db() as conn:
+        user_row = conn.execute(
+            "SELECT id, referred_by FROM users WHERE telegram_id = ?",
+            (telegram_id,)
+        ).fetchone()
+        if not user_row or user_row['referred_by'] is not None:
+            return False
+
+        ref_row = conn.execute(
+            "SELECT id FROM users WHERE telegram_id = ?",
+            (referrer_telegram_id,)
+        ).fetchone()
+        if not ref_row:
+            return False
+
+        if user_row['id'] == ref_row['id']:
+            return False
+
+        cursor = conn.execute(
+            "UPDATE users SET referred_by = ? WHERE id = ? AND referred_by IS NULL",
+            (ref_row['id'], user_row['id'])
+        )
+        success = cursor.rowcount > 0
+        if success:
+            logger.info(f"Реферер привязан: user={telegram_id}, referrer={referrer_telegram_id}")
+        return success
+
+
+def apply_referral_reward_for_trial(referred_user_id: int, reward_days: int = 7) -> bool:
+    """
+    Начисляет награду рефереру после активации trial приглашенным пользователем.
+    Награда начисляется только один раз на приглашенного.
+    """
+    with get_db() as conn:
+        referred = conn.execute("""
+            SELECT id, referred_by, referred_reward_granted
+            FROM users
+            WHERE id = ?
+        """, (referred_user_id,)).fetchone()
+
+        if not referred or not referred['referred_by'] or referred['referred_reward_granted']:
+            return False
+
+        referrer_id = referred['referred_by']
+
+        conn.execute(
+            "UPDATE users SET referred_reward_granted = 1 WHERE id = ?",
+            (referred_user_id,)
+        )
+        conn.execute("""
+            UPDATE users
+            SET referral_days_earned = COALESCE(referral_days_earned, 0) + ?
+            WHERE id = ?
+        """, (reward_days, referrer_id))
+
+        key_row = conn.execute("""
+            SELECT id
+            FROM vpn_keys
+            WHERE user_id = ?
+            ORDER BY
+                CASE WHEN expires_at > datetime('now') THEN 0 ELSE 1 END,
+                expires_at DESC
+            LIMIT 1
+        """, (referrer_id,)).fetchone()
+
+        if key_row:
+            conn.execute("""
+                UPDATE vpn_keys
+                SET expires_at = datetime(
+                    CASE
+                        WHEN expires_at > datetime('now') THEN expires_at
+                        ELSE datetime('now')
+                    END,
+                    '+' || ? || ' days'
+                )
+                WHERE id = ?
+            """, (reward_days, key_row['id']))
+
+        logger.info(
+            f"Реферальная награда начислена: referred_user={referred_user_id}, "
+            f"referrer_user={referrer_id}, days={reward_days}"
+        )
+        return True
+
+
+def apply_referral_reward_on_join(referred_telegram_id: int, reward_days: int = 7) -> Dict[str, Any]:
+    """
+    Начисляет реферальную награду сразу при первом переходе друга по ссылке.
+    """
+    with get_db() as conn:
+        referred = conn.execute("""
+            SELECT id, referred_by, referred_reward_granted
+            FROM users
+            WHERE telegram_id = ?
+        """, (referred_telegram_id,)).fetchone()
+        if not referred or not referred['referred_by'] or referred['referred_reward_granted']:
+            return {'granted': False}
+
+        referrer = conn.execute("""
+            SELECT id, telegram_id
+            FROM users
+            WHERE id = ?
+        """, (referred['referred_by'],)).fetchone()
+        if not referrer:
+            return {'granted': False}
+
+        conn.execute("UPDATE users SET referred_reward_granted = 1 WHERE id = ?", (referred['id'],))
+        conn.execute("""
+            UPDATE users
+            SET referral_days_earned = COALESCE(referral_days_earned, 0) + ?
+            WHERE id = ?
+        """, (reward_days, referrer['id']))
+
+        key_row = conn.execute("""
+            SELECT id
+            FROM vpn_keys
+            WHERE user_id = ?
+            ORDER BY
+                CASE WHEN expires_at > datetime('now') THEN 0 ELSE 1 END,
+                expires_at DESC
+            LIMIT 1
+        """, (referrer['id'],)).fetchone()
+        if key_row:
+            conn.execute("""
+                UPDATE vpn_keys
+                SET expires_at = datetime(
+                    CASE
+                        WHEN expires_at > datetime('now') THEN expires_at
+                        ELSE datetime('now')
+                    END,
+                    '+' || ? || ' days'
+                )
+                WHERE id = ?
+            """, (reward_days, key_row['id']))
+
+        logger.info(
+            f"Реферальная награда при входе: referred_tg={referred_telegram_id}, "
+            f"referrer_tg={referrer['telegram_id']}, days={reward_days}"
+        )
+        return {'granted': True, 'referrer_telegram_id': referrer['telegram_id']}
+
+
+def get_referral_stats(telegram_id: int) -> Dict[str, Any]:
+    """Статистика реферальной системы пользователя."""
+    with get_db() as conn:
+        user = conn.execute("""
+            SELECT id, COALESCE(referral_days_earned, 0) AS referral_days_earned
+            FROM users
+            WHERE telegram_id = ?
+        """, (telegram_id,)).fetchone()
+
+        if not user:
+            return {'invited_total': 0, 'trial_activated_total': 0, 'earned_days': 0}
+
+        invited_total = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM users WHERE referred_by = ?",
+            (user['id'],)
+        ).fetchone()['cnt']
+
+        trial_activated_total = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM users WHERE referred_by = ? AND used_trial = 1",
+            (user['id'],)
+        ).fetchone()['cnt']
+
+        return {
+            'invited_total': invited_total,
+            'trial_activated_total': trial_activated_total,
+            'earned_days': user['referral_days_earned'],
+        }
+
+
+def get_user_primary_key_for_profile(telegram_id: int) -> Optional[Dict[str, Any]]:
+    """Основной ключ пользователя для экрана личного кабинета."""
+    with get_db() as conn:
+        row = conn.execute("""
+            SELECT
+                vk.id, vk.user_id, vk.server_id, vk.panel_inbound_id, vk.panel_email, vk.client_uuid,
+                vk.created_at, vk.expires_at,
+                t.name AS tariff_name,
+                CASE
+                    WHEN vk.expires_at > datetime('now') THEN 1
+                    ELSE 0
+                END AS is_active
+            FROM vpn_keys vk
+            JOIN users u ON u.id = vk.user_id
+            LEFT JOIN tariffs t ON t.id = vk.tariff_id
+            WHERE u.telegram_id = ?
+            ORDER BY
+                CASE WHEN vk.expires_at > datetime('now') THEN 0 ELSE 1 END,
+                vk.expires_at DESC
+            LIMIT 1
+        """, (telegram_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_user_keys_for_subscription(telegram_id: int) -> List[Dict[str, Any]]:
+    """
+    Возвращает ключи пользователя с данными серверов для формирования подписки.
+    """
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT
+                vk.id,
+                vk.panel_email,
+                vk.expires_at,
+                vk.server_id,
+                s.name AS server_name,
+                s.host,
+                s.port,
+                s.web_base_path,
+                s.protocol
+            FROM vpn_keys vk
+            JOIN users u ON u.id = vk.user_id
+            LEFT JOIN servers s ON s.id = vk.server_id
+            WHERE u.telegram_id = ?
+            ORDER BY vk.expires_at DESC
+        """, (telegram_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+
 # ============================================================================
 # ТАРИФЫ (tariffs)
 # ============================================================================

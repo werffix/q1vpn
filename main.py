@@ -9,6 +9,7 @@ import os
 import signal
 import sys
 from aiogram import Bot, Dispatcher
+from aiogram.types import BotCommand
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import BOT_TOKEN
@@ -57,6 +58,15 @@ async def on_startup(bot: Bot):
     # Информация о боте
     bot_info = await bot.get_me()
     bot.my_username = bot_info.username
+
+    await bot.set_my_commands([
+        BotCommand(command="connect", description="Подключиться"),
+        BotCommand(command="cabinet", description="Личный кабинет"),
+        BotCommand(command="faq", description="FAQ"),
+        BotCommand(command="referrals", description="Реферальная система"),
+        BotCommand(command="support", description="Поддержка"),
+        BotCommand(command="start", description="Главное меню"),
+    ])
     logger.info(f"✅ Бот запущен: @{bot_info.username}")
 
 

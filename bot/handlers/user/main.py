@@ -7,6 +7,7 @@ import logging
 import uuid
 import asyncio
 from datetime import datetime
+from typing import Optional, Dict, Any, List
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, CommandObject, StateFilter
@@ -28,7 +29,94 @@ router = Router()
 # КОМАНДА /START
 # ============================================================================
 
-def get_welcome_text(is_admin: bool = False) -> str:
+async def _get_primary_key_traffic(telegram_id: int) -> Dict[str, Any]:
+    """Возвращает статистику трафика по основному ключу пользователя."""
+    from database.requests import get_user_primary_key_for_profile
+    from bot.services.vpn_api import get_client, format_traffic
+
+    info = {
+        'used_bytes': 0,
+        'total_bytes': 0,
+        'used_human': "0 GB",
+        'total_human': "0 GB",
+    }
+
+    key = get_user_primary_key_for_profile(telegram_id)
+    if not key:
+        return info
+
+    if not key.get('server_id') or not key.get('panel_email'):
+        return info
+
+    try:
+        client = await get_client(key['server_id'])
+        stats = await client.get_client_stats(key['panel_email'])
+        if not stats:
+            return info
+
+        used_bytes = stats.get('up', 0) + stats.get('down', 0)
+        total_bytes = stats.get('total', 0)
+        info['used_bytes'] = used_bytes
+        info['total_bytes'] = total_bytes
+        info['used_human'] = format_traffic(used_bytes)
+        info['total_human'] = format_traffic(total_bytes) if total_bytes > 0 else "Безлимит"
+    except Exception as e:
+        logger.warning(f"Не удалось получить трафик для стартового экрана user={telegram_id}: {e}")
+
+    return info
+
+
+def _is_not_expired(expires_at: Optional[str]) -> bool:
+    """Проверяет, что дата окончания в будущем."""
+    if not expires_at:
+        return False
+    try:
+        return datetime.fromisoformat(expires_at) > datetime.now()
+    except Exception:
+        return False
+
+
+def _get_support_link() -> str:
+    """Безопасно возвращает ссылку поддержки."""
+    from database.requests import get_setting
+    support_link = get_setting('support_channel_link', 'https://t.me/q1vpn_support')
+    if not support_link or not support_link.startswith(('http://', 'https://')):
+        return 'https://t.me/q1vpn_support'
+    return support_link
+
+
+async def _get_active_key_link(telegram_id: int) -> Optional[str]:
+    """Возвращает ссылку активного ключа пользователя."""
+    from database.requests import get_user_primary_key_for_profile
+    from bot.services.vpn_api import get_client
+    from bot.utils.key_generator import generate_link
+
+    key = get_user_primary_key_for_profile(telegram_id)
+    if not key:
+        return None
+    if not key.get('server_id') or not key.get('panel_email') or not _is_not_expired(key.get('expires_at')):
+        return None
+
+    try:
+        client = await get_client(key['server_id'])
+        config = await client.get_client_config(key['panel_email'])
+        if not config:
+            return None
+        config['inbound_name'] = "q1 vpn"
+        return generate_link(config)
+    except Exception as e:
+        logger.warning(f"Не удалось получить активный ключ user={telegram_id}: {e}")
+        return None
+
+
+def _format_gb_value(used_bytes: int) -> str:
+    gb_value = used_bytes / (1024 ** 3)
+    if gb_value < 0.01:
+        return "0"
+    return f"{gb_value:.2f}".rstrip('0').rstrip('.')
+
+
+async def get_welcome_text(telegram_id: int, is_admin: bool = False) -> str:
     """Формирует приветственный текст с реальными тарифами из БД."""
     from database.requests import (
         get_all_tariffs, get_setting, 
@@ -41,11 +129,14 @@ def get_welcome_text(is_admin: bool = False) -> str:
         'main_page_text',
         (
             "⚡️q1 vpn \\- быстрый, безопасный и анонимный доступ к интернету\\.\n\n"
-            "🏦 Ваш баланс:  ₽ \\( дней\\)\\.\n"
-            "🌐 Использование трафика: ГБ\n\n"
+            "🌐 Использование трафика: %traffic_used_gb% ГБ\n\n"
             "%без\\_тарифов%"
         )
     )
+
+    traffic_info = await _get_primary_key_traffic(telegram_id)
+    used_gb_str = _format_gb_value(traffic_info['used_bytes'])
+    welcome_text = welcome_text.replace("%traffic_used_gb%", escape_md2(used_gb_str))
     
     # Получаем настройки оплат
     crypto_enabled = is_crypto_configured()
@@ -120,10 +211,31 @@ async def cmd_start(message: Message, state: FSMContext, command: CommandObject)
     # Проверяем админа
     is_admin = user_id in ADMIN_IDS
     
-    text = get_welcome_text(is_admin)
+    # Deep-link реферальной системы: /start <telegram_id> или /start ref_<telegram_id>
+    args = (command.args or "").strip()
+    if args and not args.startswith("bill"):
+        from database.requests import set_referrer_if_possible, apply_referral_reward_on_join
+        ref_tg_id: Optional[int] = None
+        if args.isdigit():
+            ref_tg_id = int(args)
+        elif args.startswith("ref_") and args[4:].isdigit():
+            ref_tg_id = int(args[4:])
+
+        if ref_tg_id:
+            set_referrer_if_possible(user_id, ref_tg_id)
+            referral_result = apply_referral_reward_on_join(user_id, reward_days=7)
+            if referral_result.get('granted') and referral_result.get('referrer_telegram_id'):
+                try:
+                    await message.bot.send_message(
+                        referral_result['referrer_telegram_id'],
+                        "🎉 Ваш друг перешел по реферальной ссылке. Вам начислено 7 дней."
+                    )
+                except Exception as e:
+                    logger.warning(f"Не удалось отправить уведомление рефереру: {e}")
+
+    text = await get_welcome_text(user_id, is_admin)
     
     # Проверяем аргументы запуска (deep linking)
-    args = command.args
     if args and args.startswith("bill"):
         from bot.services.billing import process_crypto_payment
         from bot.handlers.user.payments import finalize_payment_ui
@@ -134,7 +246,7 @@ async def cmd_start(message: Message, state: FSMContext, command: CommandObject)
             
             if success and order:
                 # Используем единый финализатор UI
-                await finalize_payment_ui(message, state, text, order)
+                await finalize_payment_ui(message, state, text, order, user_id=user_id)
             else:
                  # Обычная ошибка (возвращенная текстом)
                  await message.answer(text, parse_mode="Markdown")
@@ -144,7 +256,7 @@ async def cmd_start(message: Message, state: FSMContext, command: CommandObject)
             from bot.errors import TariffNotFoundError
             
             if isinstance(e, TariffNotFoundError):
-                 from bot.database.requests import get_setting
+                 from database.requests import get_setting
                  from bot.keyboards.user import support_kb
                  
                  support_link = get_setting('support_channel_link', 'https://t.me/q1vpn_support')
@@ -157,17 +269,25 @@ async def cmd_start(message: Message, state: FSMContext, command: CommandObject)
         return
 
     # Вычисляем, показывать ли кнопку пробной подписки
-    from database.requests import is_trial_enabled, get_trial_tariff_id, has_used_trial
+    from database.requests import is_trial_enabled, get_trial_tariff_id, has_used_trial, get_setting
     show_trial = (
         is_trial_enabled() and
         get_trial_tariff_id() is not None and
         not has_used_trial(user_id)
     )
+    support_link = get_setting('support_channel_link', 'https://t.me/q1vpn_support')
+    from database.requests import get_user_primary_key_for_profile
+    has_active_subscription = _is_not_expired((get_user_primary_key_for_profile(user_id) or {}).get('expires_at'))
 
     try:
         await message.answer(
             text,
-            reply_markup=main_menu_kb(is_admin=is_admin, show_trial=show_trial),
+            reply_markup=main_menu_kb(
+                is_admin=is_admin,
+                show_trial=show_trial,
+                support_link=support_link,
+                has_active_subscription=has_active_subscription
+            ),
             parse_mode="MarkdownV2"
         )
     except TelegramForbiddenError:
@@ -193,22 +313,30 @@ async def callback_start(callback: CallbackQuery, state: FSMContext):
     # Проверяем админа
     is_admin = user_id in ADMIN_IDS
     
-    text = get_welcome_text(is_admin)
+    text = await get_welcome_text(user_id, is_admin)
 
     # Вычисляем, показывать ли кнопку пробной подписки
-    from database.requests import is_trial_enabled, get_trial_tariff_id, has_used_trial
+    from database.requests import is_trial_enabled, get_trial_tariff_id, has_used_trial, get_setting
     show_trial = (
         is_trial_enabled() and
         get_trial_tariff_id() is not None and
         not has_used_trial(user_id)
     )
+    support_link = get_setting('support_channel_link', 'https://t.me/q1vpn_support')
+    from database.requests import get_user_primary_key_for_profile
+    has_active_subscription = _is_not_expired((get_user_primary_key_for_profile(user_id) or {}).get('expires_at'))
     
     # Пытаемся отредактировать сообщение (если текст)
     # Если это фото/файл (после выдачи ключа), edit_text упадёт.
     try:
         await callback.message.edit_text(
             text,
-            reply_markup=main_menu_kb(is_admin=is_admin, show_trial=show_trial),
+            reply_markup=main_menu_kb(
+                is_admin=is_admin,
+                show_trial=show_trial,
+                support_link=support_link,
+                has_active_subscription=has_active_subscription
+            ),
             parse_mode="MarkdownV2"
         )
     except Exception:
@@ -219,7 +347,12 @@ async def callback_start(callback: CallbackQuery, state: FSMContext):
             pass
         await callback.message.answer(
             text,
-            reply_markup=main_menu_kb(is_admin=is_admin, show_trial=show_trial),
+            reply_markup=main_menu_kb(
+                is_admin=is_admin,
+                show_trial=show_trial,
+                support_link=support_link,
+                has_active_subscription=has_active_subscription
+            ),
             parse_mode="MarkdownV2"
         )
 
@@ -271,6 +404,7 @@ async def activate_trial_subscription(callback: CallbackQuery, state: FSMContext
     from database.requests import (
         is_trial_enabled, get_trial_tariff_id, has_used_trial, get_tariff_by_id,
         get_or_create_user, mark_trial_used, create_initial_vpn_key,
+        apply_referral_reward_for_trial,
         create_pending_order, complete_order
     )
     from bot.handlers.user.payments import start_new_key_config
@@ -303,6 +437,7 @@ async def activate_trial_subscription(callback: CallbackQuery, state: FSMContext
 
     # Ставим флаг пробного периода
     mark_trial_used(internal_user_id)
+    apply_referral_reward_for_trial(internal_user_id, reward_days=7)
     logger.info(
         f"Пользователь {user_id} активировал пробный период (tарифf ID={tariff_id})"
     )
@@ -357,8 +492,9 @@ async def cmd_mykeys(message: Message, state: FSMContext):
 
 
 @router.message(Command("help"))
+@router.message(Command("faq"))
 async def cmd_help(message: Message, state: FSMContext):
-    """Обработчик команды /help - вызывает логику кнопки 'Справка'."""
+    """Обработчик /help и /faq."""
     # Проверяем бан
     if is_user_banned(message.from_user.id):
         await message.answer(
@@ -375,9 +511,289 @@ async def cmd_help(message: Message, state: FSMContext):
     await show_help(message.answer)
 
 
+@router.message(Command("cabinet"))
+async def cmd_cabinet(message: Message, state: FSMContext):
+    """Обработчик /cabinet."""
+    if is_user_banned(message.from_user.id):
+        await message.answer(
+            "⛔ *Доступ заблокирован*\n\n"
+            "Ваш аккаунт заблокирован. Обратитесь в поддержку.",
+            parse_mode="Markdown"
+        )
+        return
+    await state.clear()
+    await show_cabinet(message.from_user.id, message.answer)
+
+
+@router.message(Command("connect"))
+async def cmd_connect(message: Message, state: FSMContext):
+    """Обработчик /connect."""
+    if is_user_banned(message.from_user.id):
+        await message.answer(
+            "⛔ *Доступ заблокирован*\n\n"
+            "Ваш аккаунт заблокирован. Обратитесь в поддержку.",
+            parse_mode="Markdown"
+        )
+        return
+    await state.clear()
+    await show_connect_entry(message.from_user.id, message.answer)
+
+
+@router.message(Command("referrals"))
+async def cmd_referrals(message: Message, state: FSMContext):
+    """Обработчик /referrals."""
+    if is_user_banned(message.from_user.id):
+        await message.answer(
+            "⛔ *Доступ заблокирован*\n\n"
+            "Ваш аккаунт заблокирован. Обратитесь в поддержку.",
+            parse_mode="Markdown"
+        )
+        return
+    await state.clear()
+    await show_referrals(message.from_user.id, message.bot, message.answer)
+
+
+@router.message(Command("support"))
+async def cmd_support(message: Message, state: FSMContext):
+    """Обработчик /support."""
+    from database.requests import get_setting
+    from bot.keyboards.user import support_kb
+    if is_user_banned(message.from_user.id):
+        await message.answer(
+            "⛔ *Доступ заблокирован*\n\n"
+            "Ваш аккаунт заблокирован. Обратитесь в поддержку.",
+            parse_mode="Markdown"
+        )
+        return
+    await state.clear()
+    support_link = get_setting('support_channel_link', 'https://t.me/q1vpn_support')
+    await message.answer("💬 Поддержка", reply_markup=support_kb(support_link))
+
+
 # ============================================================================
 # РАЗДЕЛ «МОИ КЛЮЧИ»
 # ============================================================================
+
+async def show_cabinet(telegram_id: int, send_function):
+    """Показывает личный кабинет пользователя."""
+    from database.requests import get_user_primary_key_for_profile
+    from bot.keyboards.user import cabinet_kb
+
+    key = get_user_primary_key_for_profile(telegram_id)
+    if not key:
+        await send_function(
+            "👤 Личный кабинет\n\n"
+            "🔎 Информация о подписке:\n"
+            "├ Текущий план: —\n"
+            "├ Дата начала: —\n"
+            "├ Дата окончания: —\n"
+            "└ Лимит устройств: 3\n\n"
+            "🛩 Использование трафика:\n"
+            "0 GB из 0 GB",
+            reply_markup=cabinet_kb()
+        )
+        return
+
+    traffic = await _get_primary_key_traffic(telegram_id)
+    plan = key.get('tariff_name') or "—"
+    start_date = (key.get('created_at') or "—")[:10]
+    end_date = (key.get('expires_at') or "—")[:10]
+    limit_ip = key.get('limit_ip') or 3
+
+    await send_function(
+        "👤 Личный кабинет\n\n"
+        "🔎 Информация о подписке:\n"
+        f"├ Текущий план: {plan}\n"
+        f"├ Дата начала: {start_date}\n"
+        f"├ Дата окончания: {end_date}\n"
+        f"└ Лимит устройств: {limit_ip}\n\n"
+        "🛩 Использование трафика:\n"
+        f"{traffic['used_human']} из {traffic['total_human']}",
+        reply_markup=cabinet_kb()
+    )
+
+
+async def show_referrals(telegram_id: int, bot, send_function):
+    """Показывает страницу реферальной системы."""
+    from database.requests import get_referral_stats
+    from bot.keyboards.user import referrals_kb
+
+    stats = get_referral_stats(telegram_id)
+    bot_username = getattr(bot, 'my_username', None)
+    if not bot_username:
+        me = await bot.get_me()
+        bot_username = me.username
+
+    ref_link = f"https://t.me/{bot_username}?start={telegram_id}"
+    text = (
+        f"👤 Приглашено рефералов: {stats['invited_total']}\n"
+        f"✅ Оформили подписку: {stats['trial_activated_total']}\n"
+        f"💰 Заработано дней на рефералах: {stats['earned_days']}\n"
+        f"⚙️ Ваша реф. ссылка: {ref_link}\n\n"
+        "🗣 За каждого приведенного пользователя Вы получите 7 дня подписки, "
+        "а Ваш друг - пробный период в 7 дней\n\n"
+        "Дни начисляются сразу как реферал оформит пробный период"
+    )
+    await send_function(text, reply_markup=referrals_kb(ref_link))
+
+
+async def show_connect_entry(telegram_id: int, send_function):
+    """Вход в раздел подключения."""
+    from bot.keyboards.user import connect_devices_kb, subscribe_only_kb
+    from database.requests import get_user_primary_key_for_profile
+
+    primary_key = get_user_primary_key_for_profile(telegram_id)
+    if not primary_key or not _is_not_expired(primary_key.get('expires_at')):
+        await send_function(
+            "🔐 Безопасный, быстрый и анонимный VPN\n\n"
+            "Получите стабильный доступ к интернету без ограничений.\n\n"
+            "Преимущества:\n\n"
+            "⚡ Высокая скорость — быстрые сервера без потери скорости\n"
+            "🛡 Надёжная защита данных — ваше соединение зашифровано\n"
+            "👤 Анонимность — ваш реальный IP скрыт\n"
+            "🌍 Обход белых списков — доступ к любым сайтам и сервисам\n"
+            "📱 Работает на всех устройствах — iOS, Android, Windows, Mac\n"
+            "🔒 Современный протокол VLESS — стабильная и безопасная работа",
+            reply_markup=subscribe_only_kb()
+        )
+        return
+
+    await send_function(
+        "Выберите устройство, которое хотите подключить:",
+        reply_markup=connect_devices_kb()
+    )
+
+
+async def show_connect_android(telegram_id: int, send_function):
+    from bot.keyboards.user import connect_android_kb
+
+    key_link = await _get_active_key_link(telegram_id)
+    key_text = key_link or "Ключ недоступен. Обратитесь в поддержку."
+
+    await send_function(
+        "📖 Подключение на Android:\n\n"
+        "1. Нажмите на «📥 Скачать приложение» и установите программу.\n"
+        f"2. Скопируйте ключ и вставьте в приложении:\n`{key_text}`\n"
+        "3. Всё готово! Теперь вы можете выбрать локацию и подключиться!",
+        reply_markup=connect_android_kb(),
+        parse_mode="Markdown"
+    )
+
+
+async def show_connect_ios(telegram_id: int, send_function):
+    from bot.keyboards.user import connect_ios_kb
+
+    key_link = await _get_active_key_link(telegram_id)
+    key_text = key_link or "Ключ недоступен. Обратитесь в поддержку."
+
+    await send_function(
+        "📖 Подключение на iOS/MacOS (M):\n\n"
+        "1. Нажмите на «📥 Скачать из AppStore Россия» и установите программу.\n"
+        "Если первое недоступно - нажмите «📥 Скачать из AppStore Global».\n\n"
+        f"2. Скопируйте ключ и вставьте в приложении:\n`{key_text}`\n\n"
+        "3. Всё готово! Теперь вы можете выбрать локацию и подключиться!",
+        reply_markup=connect_ios_kb(),
+        parse_mode="Markdown"
+    )
+
+
+async def show_connect_windows(telegram_id: int, send_function):
+    from bot.keyboards.user import connect_windows_kb
+
+    key_link = await _get_active_key_link(telegram_id)
+    key_text = key_link or "Ключ недоступен. Обратитесь в поддержку."
+
+    await send_function(
+        "📖 Подключение на Windows:\n\n"
+        "1. Нажмите на «📥 Скачать программу», установите и от имени администратора запустите Happ.\n\n"
+        f"2. Откройте Telegram на ПК, скопируйте ключ и вставьте в приложение:\n`{key_text}`\n\n"
+        "3. Всё готово! Теперь вы можете выбрать локацию и подключиться!",
+        reply_markup=connect_windows_kb(),
+        parse_mode="Markdown"
+    )
+
+
+async def show_subscription_bundle(telegram_id: int, send_function):
+    """
+    Отдаёт пользователю subscription-ссылки и subscription-ответ (base64 со списком всех серверов).
+    """
+    import base64
+    from database.requests import get_user_keys_for_subscription, get_user_primary_key_for_profile
+    from bot.services.vpn_api import get_client
+    from bot.utils.key_generator import generate_link
+    from bot.keyboards.admin import home_only_kb
+
+    keys = get_user_keys_for_subscription(telegram_id)
+    if not keys:
+        await send_function(
+            "📡 Подписка пока недоступна: у вас нет активированных ключей.",
+            reply_markup=home_only_kb()
+        )
+        return
+
+    links: List[str] = []
+    sub_urls: List[str] = []
+    server_names: List[str] = []
+
+    for key in keys:
+        if not key.get('server_id') or not key.get('panel_email'):
+            continue
+
+        try:
+            client = await get_client(key['server_id'])
+            config = await client.get_client_config(key['panel_email'])
+            if not config:
+                continue
+
+            # Название подключения для клиентов
+            config['inbound_name'] = "q1 vpn"
+            links.append(generate_link(config))
+
+            sub_id = config.get('sub_id')
+            if sub_id and key.get('host') and key.get('port'):
+                protocol = key.get('protocol') or 'https'
+                base_path = (key.get('web_base_path') or '').strip('/')
+                path_prefix = f"/{base_path}" if base_path else ""
+                sub_urls.append(f"{protocol}://{key['host']}:{key['port']}{path_prefix}/sub/{sub_id}")
+
+            if key.get('server_name'):
+                server_names.append(str(key['server_name']))
+        except Exception as e:
+            logger.warning(f"Не удалось собрать подписку для key={key.get('id')}: {e}")
+
+    if not links:
+        await send_function(
+            "📡 Не удалось подготовить подписку. Проверьте доступность серверов.",
+            reply_markup=home_only_kb()
+        )
+        return
+
+    primary = get_user_primary_key_for_profile(telegram_id)
+    traffic = await _get_primary_key_traffic(telegram_id)
+    expires_at = ((primary or {}).get('expires_at') or "—")[:10]
+
+    # Универсальный subscription-ответ для импорта из буфера
+    raw_response = "\n".join(links)
+    encoded_response = base64.b64encode(raw_response.encode('utf-8')).decode('utf-8')
+
+    description = "⚡ Быстрое соединение\n🔒 Полная приватность\n\nБот: @q1vpn_vot"
+    servers_text = ", ".join(sorted(set(server_names))) if server_names else "—"
+    first_sub_url = sub_urls[0] if sub_urls else "—"
+
+    text = (
+        "📡 *Подписка q1 vpn*\n\n"
+        f"• Название: q1 vpn\n"
+        f"• Расход трафика: {traffic['used_human']}\n"
+        f"• Лимит трафика: {traffic['total_human']}\n"
+        f"• Дата окончания: {expires_at}\n\n"
+        f"{description}\n\n"
+        f"• Список серверов: {servers_text}\n\n"
+        f"*Subscription URL:* `{first_sub_url}`\n\n"
+        "*Subscription response (base64):*\n"
+        f"`{encoded_response}`"
+    )
+
+    await send_function(text, reply_markup=home_only_kb(), parse_mode="Markdown")
 
 async def show_my_keys(telegram_id: int, send_function):
     """
@@ -510,9 +926,9 @@ async def show_help(send_function):
     )
 
 
-@router.callback_query(F.data == "help")
+@router.callback_query(F.data.in_(["help", "faq"]))
 async def help_handler(callback: CallbackQuery):
-    """Показывает справку по кнопке."""
+    """Показывает FAQ по кнопке."""
     # Пытаемся отредактировать (если текст)
     # Если это фото/файл (после замены/покупки/показа), edit_text упадёт.
     try:
@@ -525,6 +941,263 @@ async def help_handler(callback: CallbackQuery):
             pass
         await show_help(callback.message.answer)
     
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cabinet")
+async def cabinet_handler(callback: CallbackQuery):
+    """Показывает личный кабинет по кнопке."""
+    try:
+        await show_cabinet(callback.from_user.id, callback.message.edit_text)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await show_cabinet(callback.from_user.id, callback.message.answer)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cabinet_manage")
+async def cabinet_manage_handler(callback: CallbackQuery):
+    """Раздел управления подпиской."""
+    from bot.keyboards.user import cabinet_manage_kb
+    text = "⚙️ Управление подпиской\n\nВыберите раздел:"
+    try:
+        await callback.message.edit_text(text, reply_markup=cabinet_manage_kb())
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(text, reply_markup=cabinet_manage_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cabinet_devices")
+async def cabinet_devices_handler(callback: CallbackQuery):
+    """Раздел устройств."""
+    from bot.keyboards.user import cabinet_devices_kb
+    text = (
+        "📱 Устройства\n\n"
+        "Увеличить лимит устройств:\n"
+        "• До 6 устройств (+100 рублей)\n"
+        "• До 9 устройств (+200 рублей)\n"
+        "• До 12 устройств (+200 рублей)\n\n"
+        "Или удалите устройство из текущих подключений."
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=cabinet_devices_kb())
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(text, reply_markup=cabinet_devices_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "referrals")
+async def referrals_handler(callback: CallbackQuery):
+    """Показывает реферальную систему по кнопке."""
+    try:
+        await show_referrals(callback.from_user.id, callback.bot, callback.message.edit_text)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await show_referrals(callback.from_user.id, callback.bot, callback.message.answer)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "connect_start")
+async def connect_start_handler(callback: CallbackQuery):
+    """Открывает раздел подключения."""
+    try:
+        await show_connect_entry(callback.from_user.id, callback.message.edit_text)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await show_connect_entry(callback.from_user.id, callback.message.answer)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "subscription")
+async def subscription_alias_handler(callback: CallbackQuery):
+    """Совместимость со старыми кнопками Подписка."""
+    await connect_start_handler(callback)
+
+
+@router.callback_query(F.data == "connect_android")
+async def connect_android_handler(callback: CallbackQuery):
+    try:
+        await show_connect_android(callback.from_user.id, callback.message.edit_text)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await show_connect_android(callback.from_user.id, callback.message.answer)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "connect_ios")
+async def connect_ios_handler(callback: CallbackQuery):
+    try:
+        await show_connect_ios(callback.from_user.id, callback.message.edit_text)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await show_connect_ios(callback.from_user.id, callback.message.answer)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "connect_windows")
+async def connect_windows_handler(callback: CallbackQuery):
+    try:
+        await show_connect_windows(callback.from_user.id, callback.message.edit_text)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await show_connect_windows(callback.from_user.id, callback.message.answer)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("device_limit:"))
+async def device_limit_handler(callback: CallbackQuery):
+    """Покупка увеличения лимита устройств."""
+    from aiogram.types import LabeledPrice, InlineKeyboardButton
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from database.requests import (
+        get_user_primary_key_for_profile,
+        is_cards_configured,
+        get_setting,
+    )
+
+    parts = callback.data.split(":")
+    target_limit = int(parts[1])
+    amount_rub = int(parts[2])
+
+    key = get_user_primary_key_for_profile(callback.from_user.id)
+    if not key or not _is_not_expired(key.get('expires_at')):
+        await callback.answer("❌ Нет активной подписки", show_alert=True)
+        return
+
+    if not is_cards_configured():
+        await callback.answer("❌ Оплата картой сейчас недоступна", show_alert=True)
+        return
+
+    provider_token = get_setting('cards_provider_token', '')
+    if not provider_token:
+        await callback.answer("❌ Не настроен платежный токен", show_alert=True)
+        return
+
+    bot_info = await callback.bot.get_me()
+    payload = f"device_limit:{key['id']}:{target_limit}"
+
+    await callback.message.answer_invoice(
+        title=bot_info.first_name,
+        description=f"Увеличение лимита устройств до {target_limit}.",
+        payload=payload,
+        provider_token=provider_token,
+        currency="RUB",
+        prices=[LabeledPrice(label=f"До {target_limit} устройств", amount=amount_rub * 100)],
+        reply_markup=InlineKeyboardBuilder().row(
+            InlineKeyboardButton(text=f"💳 Оплатить {amount_rub} ₽", pay=True)
+        ).as_markup()
+    )
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "device_remove_menu")
+async def device_remove_menu_handler(callback: CallbackQuery):
+    """Список активных устройств для удаления."""
+    from database.requests import get_user_primary_key_for_profile
+    from bot.keyboards.user import device_remove_kb
+    from bot.services.vpn_api import get_client
+
+    key = get_user_primary_key_for_profile(callback.from_user.id)
+    if not key or not key.get('server_id') or not key.get('panel_email'):
+        await callback.answer("❌ Активный ключ не найден", show_alert=True)
+        return
+
+    device_names: List[str] = []
+    try:
+        client = await get_client(key['server_id'])
+        ips = await client.get_client_online_ips(key['panel_email'])
+        device_names = [ip for ip in ips if ip]
+    except Exception as e:
+        logger.warning(f"Не удалось получить список устройств: {e}")
+
+    if not device_names:
+        device_names = ["Текущее устройство"]
+
+    text = "Выберите устройство для удаления:"
+    try:
+        await callback.message.edit_text(text, reply_markup=device_remove_kb(device_names))
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(text, reply_markup=device_remove_kb(device_names))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "noop")
+async def noop_callback(callback: CallbackQuery):
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("device_remove:"))
+async def device_remove_confirm_handler(callback: CallbackQuery):
+    """Подтверждение удаления устройства."""
+    from bot.keyboards.user import device_remove_confirm_kb
+
+    device_name = callback.data.split(":", maxsplit=1)[1]
+    await callback.message.edit_text(
+        f"Вы действительно хотите удалить устройство?\n\n{device_name}",
+        reply_markup=device_remove_confirm_kb(device_name)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("device_remove_yes:"))
+async def device_remove_execute_handler(callback: CallbackQuery):
+    """Сбрасывает текущие активные сессии ключа."""
+    from database.requests import get_user_primary_key_for_profile
+    from bot.services.vpn_api import get_client
+    from bot.keyboards.user import cabinet_devices_kb
+
+    key = get_user_primary_key_for_profile(callback.from_user.id)
+    if not key or not key.get('server_id') or not key.get('panel_email'):
+        await callback.answer("❌ Активный ключ не найден", show_alert=True)
+        return
+
+    try:
+        client = await get_client(key['server_id'])
+        await client.clear_client_online_ips(key['panel_email'])
+        await callback.message.edit_text(
+            "✅ Устройство удалено из активной сессии.",
+            reply_markup=cabinet_devices_kb()
+        )
+    except Exception as e:
+        logger.warning(f"Ошибка удаления устройства: {e}")
+        await callback.answer("❌ Не удалось удалить устройство", show_alert=True)
+        return
+
     await callback.answer()
 
 
@@ -1020,7 +1693,7 @@ async def key_replace_execute(callback: CallbackQuery, state: FSMContext):
             email=new_email,
             total_gb=limit_gb,
             expire_days=days_left,
-            limit_ip=1,
+            limit_ip=3,
             enable=True,
             tg_id=str(telegram_id),
             flow=flow
@@ -1211,19 +1884,18 @@ async def buy_key_handler(callback: CallbackQuery):
         return
     
     # Формируем текст с условиями
-    text = """💳 *Купить ключ*
+    text = """🔐 Безопасный, быстрый и анонимный VPN
 
-🔐 *Что вы получаете:*
-• Доступ к нескольким серверам и протоколам
-• 1 ключ = 1 устройство (одновременное подключение)
-• Лимит трафика: до 1 ТБ в месяц (сброс каждые 30 дней)
+Получите стабильный доступ к интернету без ограничений.
 
-⚠️ *Важно знать:*
-• Средства не возвращаются — услуга считается оказанной в момент получения ключа
-• Мы не даём никаких гарантий бесперебойной работы сервиса в будущем
-• Мы не можем гарантировать, что данная технология останется рабочей
+Преимущества:
 
-_Приобретая ключ, вы соглашаетесь с этими условиями._
+⚡ Высокая скорость — быстрые сервера без потери скорости
+🛡 Надёжная защита данных — ваше соединение зашифровано
+👤 Анонимность — ваш реальный IP скрыт
+🌍 Обход белых списков — доступ к любым сайтам и сервисам
+📱 Работает на всех устройствах — iOS, Android, Windows, Mac
+🔒 Современный протокол VLESS — стабильная и безопасная работа
 
 Выберите способ оплаты:"""
     
@@ -1247,24 +1919,6 @@ _Приобретая ключ, вы соглашаетесь с этими ус
                                     order_id=existing_order_id),
             parse_mode="Markdown"
         )
-        
-    await callback.answer()
-
-
-
-@router.callback_query(F.data == "help")
-async def help_stub(callback: CallbackQuery):
-    """Раздел справки."""
-    # Вызываем общую логику с обработкой ошибок (если текущее сообщение - фото/файл)
-    try:
-        await show_help(callback.message.edit_text)
-    except Exception:
-        # Если это фото/файл, удаляем и присылаем новое
-        try:
-            await callback.message.delete()
-        except:
-            pass
-        await show_help(callback.message.answer)
         
     await callback.answer()
 

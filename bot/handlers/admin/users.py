@@ -1065,7 +1065,7 @@ async def confirm_add_key(callback: CallbackQuery, state: FSMContext, bot: Bot):
             email=email,
             total_gb=traffic_gb,
             expire_days=days,
-            limit_ip=1,
+            limit_ip=3,
             tg_id=str(user_telegram_id),
             flow=flow
         )

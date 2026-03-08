@@ -7,7 +7,12 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
-def main_menu_kb(is_admin: bool = False, show_trial: bool = False) -> InlineKeyboardMarkup:
+def main_menu_kb(
+    is_admin: bool = False,
+    show_trial: bool = False,
+    support_link: str = "https://t.me/q1vpn_support",
+    has_active_subscription: bool = False
+) -> InlineKeyboardMarkup:
     """
     Главное меню пользователя.
     
@@ -18,9 +23,13 @@ def main_menu_kb(is_admin: bool = False, show_trial: bool = False) -> InlineKeyb
     builder = InlineKeyboardBuilder()
     
     # Основные кнопки
+    connect_text = "🔌 Подключиться" if has_active_subscription else "💳 Оформить подписку"
+    connect_callback = "connect_start" if has_active_subscription else "buy_key"
+
+    builder.row(InlineKeyboardButton(text=connect_text, callback_data=connect_callback))
     builder.row(
-        InlineKeyboardButton(text="🔑 Мои ключи", callback_data="my_keys"),
-        InlineKeyboardButton(text="💳 Купить ключ", callback_data="buy_key")
+        InlineKeyboardButton(text="👤 Личный кабинет", callback_data="cabinet"),
+        InlineKeyboardButton(text="🤝 Реферальная система", callback_data="referrals")
     )
     
     # Кнопка «Пробная подписка» (над Справкой, если доступна)
@@ -30,7 +39,10 @@ def main_menu_kb(is_admin: bool = False, show_trial: bool = False) -> InlineKeyb
         )
     
     builder.row(
-        InlineKeyboardButton(text="❓ Справка", callback_data="help")
+        InlineKeyboardButton(text="❓ FAQ", callback_data="faq")
+    )
+    builder.row(
+        InlineKeyboardButton(text="💬 Поддержка", url=support_link)
     )
     
     # Кнопка админ-панели (только для админов)
@@ -41,6 +53,170 @@ def main_menu_kb(is_admin: bool = False, show_trial: bool = False) -> InlineKeyb
     
     return builder.as_markup()
 
+
+def connect_devices_kb() -> InlineKeyboardMarkup:
+    """Клавиатура выбора устройства для подключения."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🤖 Android", callback_data="connect_android"),
+        InlineKeyboardButton(text="🍎 iOS/MacOS (M)", callback_data="connect_ios"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🪟 Windows", callback_data="connect_windows"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🈴 На главную", callback_data="start")
+    )
+    return builder.as_markup()
+
+
+def connect_android_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="📥 Скачать приложение",
+            url="https://play.google.com/store/apps/details?id=com.happproxy"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="connect_start"),
+        InlineKeyboardButton(text="🈴 На главную", callback_data="start")
+    )
+    return builder.as_markup()
+
+
+def connect_ios_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="📥 Скачать из AppStore Россия",
+            url="https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="📥 Скачать из AppStore Global",
+            url="https://apps.apple.com/us/app/happ-proxy-utility/id6504287215"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="connect_start"),
+        InlineKeyboardButton(text="🈴 На главную", callback_data="start")
+    )
+    return builder.as_markup()
+
+
+def connect_windows_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📥 Скачать программу", url="https://www.happ.su/main")
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="connect_start"),
+        InlineKeyboardButton(text="🈴 На главную", callback_data="start")
+    )
+    return builder.as_markup()
+
+
+def subscribe_only_kb() -> InlineKeyboardMarkup:
+    """Клавиатура, если подписка не оформлена."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="💳 Оформить подписку", callback_data="buy_key")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🈴 На главную", callback_data="start")
+    )
+    return builder.as_markup()
+
+
+def cabinet_kb() -> InlineKeyboardMarkup:
+    """Клавиатура личного кабинета."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="⚙️ Управление подпиской", callback_data="cabinet_manage")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🈴 На главную", callback_data="start")
+    )
+    return builder.as_markup()
+
+
+def cabinet_manage_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📱 Устройства", callback_data="cabinet_devices")
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="cabinet"),
+        InlineKeyboardButton(text="🈴 На главную", callback_data="start")
+    )
+    return builder.as_markup()
+
+
+def cabinet_devices_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="До 6 устройств (+100 ₽)", callback_data="device_limit:6:100")
+    )
+    builder.row(
+        InlineKeyboardButton(text="До 9 устройств (+200 ₽)", callback_data="device_limit:9:200")
+    )
+    builder.row(
+        InlineKeyboardButton(text="До 12 устройств (+200 ₽)", callback_data="device_limit:12:200")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🗑 Удаление устройств", callback_data="device_remove_menu")
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="cabinet_manage"),
+        InlineKeyboardButton(text="🈴 На главную", callback_data="start")
+    )
+    return builder.as_markup()
+
+
+def device_remove_kb(device_names: list[str]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if not device_names:
+        builder.row(
+            InlineKeyboardButton(text="Нет активных устройств", callback_data="noop")
+        )
+    else:
+        for name in device_names:
+            builder.row(
+                InlineKeyboardButton(text=f"📱 {name}", callback_data=f"device_remove:{name}")
+            )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="cabinet_devices"),
+        InlineKeyboardButton(text="🈴 На главную", callback_data="start")
+    )
+    return builder.as_markup()
+
+
+def device_remove_confirm_kb(device_name: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Да", callback_data=f"device_remove_yes:{device_name}"),
+        InlineKeyboardButton(text="❌ Нет", callback_data="device_remove_menu")
+    )
+    return builder.as_markup()
+
+
+def referrals_kb(referral_link: str) -> InlineKeyboardMarkup:
+    """Клавиатура реферальной системы."""
+    builder = InlineKeyboardBuilder()
+    share_text = (
+        "Подключайся к q1 vpn по моей ссылке:\n"
+        f"{referral_link}\n\n"
+        "За пробный период получим бонусные дни."
+    )
+    builder.row(
+        InlineKeyboardButton(text="📤 Поделиться", switch_inline_query=share_text)
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="start")
+    )
+    return builder.as_markup()
 
 
 def help_kb(news_link: str, support_link: str) -> InlineKeyboardMarkup:
@@ -282,9 +458,9 @@ def key_manage_kb(key_id: int, is_unconfigured: bool = False) -> InlineKeyboardM
             InlineKeyboardButton(text="✏️ Переименовать", callback_data=f"key_rename:{key_id}")
         )
     
-    # ТРЕТИЙ ряд (унифицированный): Инструкция и Мои ключи
+    # ТРЕТИЙ ряд: FAQ и возврат
     builder.row(
-        InlineKeyboardButton(text="🔑 Мои ключи", callback_data="my_keys"),
+        InlineKeyboardButton(text="❓ FAQ", callback_data="faq"),
         InlineKeyboardButton(text="🈴 На главную", callback_data="start")
     )
     
@@ -556,15 +732,15 @@ def key_issued_kb() -> InlineKeyboardMarkup:
     Универсальная клавиатура после выдачи или при показе ключа (QR-код).
     
     Layout:
-    1. Инструкция | Мои ключи
+    1. FAQ | Личный кабинет
     2. На главную
     """
     builder = InlineKeyboardBuilder()
     
     # Первый ряд
     builder.row(
-        InlineKeyboardButton(text="📄 Инструкция", callback_data="help"),
-        InlineKeyboardButton(text="🔑 Мои ключи", callback_data="my_keys")
+        InlineKeyboardButton(text="❓ FAQ", callback_data="faq"),
+        InlineKeyboardButton(text="👤 Личный кабинет", callback_data="cabinet")
     )
     
     # Второй ряд
@@ -669,4 +845,3 @@ def qr_tariff_select_kb(tariffs: list) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🈴 На главную", callback_data="start")
     )
     return builder.as_markup()
-
