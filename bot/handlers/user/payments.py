@@ -198,11 +198,45 @@ async def pre_checkout_handler(pre_checkout: PreCheckoutQuery):
 async def successful_payment_handler(message: Message, state: FSMContext):
     """Обработка успешной оплаты Stars."""
     from bot.services.billing import process_payment_order
+    from database.requests import get_key_details_for_user
+    from bot.services.vpn_api import get_client
+    from bot.keyboards.user import cabinet_devices_kb
     
     payment = message.successful_payment
     payload = payment.invoice_payload
     
     logger.info(f"Успешная оплата Stars: {payload}, charge_id={payment.telegram_payment_charge_id}")
+
+    if payload.startswith("device_limit:"):
+        try:
+            _, key_id_str, limit_ip_str = payload.split(":")
+            key_id = int(key_id_str)
+            limit_ip = int(limit_ip_str)
+        except Exception:
+            await message.answer("❌ Некорректный payload оплаты.")
+            return
+
+        key = get_key_details_for_user(key_id, message.from_user.id)
+        if not key or not key.get('server_id') or not key.get('panel_email'):
+            await message.answer("❌ Ключ для обновления не найден.")
+            return
+
+        try:
+            client = await get_client(key['server_id'])
+            await client.update_client_limit_ip(
+                inbound_id=key['panel_inbound_id'],
+                client_uuid=key['client_uuid'],
+                email=key['panel_email'],
+                limit_ip=limit_ip
+            )
+            await message.answer(
+                f"✅ Лимит устройств обновлён: до {limit_ip}.",
+                reply_markup=cabinet_devices_kb()
+            )
+        except Exception as e:
+            logger.exception(f"Ошибка обновления лимита устройств: {e}")
+            await message.answer("❌ Не удалось обновить лимит устройств. Обратитесь в поддержку.")
+        return
     
     # Парсим payload
     if payload.startswith("renew:"):
@@ -502,7 +536,7 @@ async def process_new_key_final(callback: CallbackQuery, state: FSMContext, serv
             email=panel_email,
             total_gb=limit_gb, 
             expire_days=days,
-            limit_ip=1,
+            limit_ip=3,
             enable=True,
             tg_id=str(telegram_id),
             flow=flow

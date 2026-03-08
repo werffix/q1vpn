@@ -573,6 +573,63 @@ def apply_referral_reward_for_trial(referred_user_id: int, reward_days: int = 7)
         return True
 
 
+def apply_referral_reward_on_join(referred_telegram_id: int, reward_days: int = 7) -> Dict[str, Any]:
+    """
+    Начисляет реферальную награду сразу при первом переходе друга по ссылке.
+    """
+    with get_db() as conn:
+        referred = conn.execute("""
+            SELECT id, referred_by, referred_reward_granted
+            FROM users
+            WHERE telegram_id = ?
+        """, (referred_telegram_id,)).fetchone()
+        if not referred or not referred['referred_by'] or referred['referred_reward_granted']:
+            return {'granted': False}
+
+        referrer = conn.execute("""
+            SELECT id, telegram_id
+            FROM users
+            WHERE id = ?
+        """, (referred['referred_by'],)).fetchone()
+        if not referrer:
+            return {'granted': False}
+
+        conn.execute("UPDATE users SET referred_reward_granted = 1 WHERE id = ?", (referred['id'],))
+        conn.execute("""
+            UPDATE users
+            SET referral_days_earned = COALESCE(referral_days_earned, 0) + ?
+            WHERE id = ?
+        """, (reward_days, referrer['id']))
+
+        key_row = conn.execute("""
+            SELECT id
+            FROM vpn_keys
+            WHERE user_id = ?
+            ORDER BY
+                CASE WHEN expires_at > datetime('now') THEN 0 ELSE 1 END,
+                expires_at DESC
+            LIMIT 1
+        """, (referrer['id'],)).fetchone()
+        if key_row:
+            conn.execute("""
+                UPDATE vpn_keys
+                SET expires_at = datetime(
+                    CASE
+                        WHEN expires_at > datetime('now') THEN expires_at
+                        ELSE datetime('now')
+                    END,
+                    '+' || ? || ' days'
+                )
+                WHERE id = ?
+            """, (reward_days, key_row['id']))
+
+        logger.info(
+            f"Реферальная награда при входе: referred_tg={referred_telegram_id}, "
+            f"referrer_tg={referrer['telegram_id']}, days={reward_days}"
+        )
+        return {'granted': True, 'referrer_telegram_id': referrer['telegram_id']}
+
+
 def get_referral_stats(telegram_id: int) -> Dict[str, Any]:
     """Статистика реферальной системы пользователя."""
     with get_db() as conn:
@@ -607,7 +664,8 @@ def get_user_primary_key_for_profile(telegram_id: int) -> Optional[Dict[str, Any
     with get_db() as conn:
         row = conn.execute("""
             SELECT
-                vk.id, vk.user_id, vk.server_id, vk.panel_email, vk.created_at, vk.expires_at,
+                vk.id, vk.user_id, vk.server_id, vk.panel_inbound_id, vk.panel_email, vk.client_uuid,
+                vk.created_at, vk.expires_at,
                 t.name AS tariff_name,
                 CASE
                     WHEN vk.expires_at > datetime('now') THEN 1

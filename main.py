@@ -60,9 +60,9 @@ async def on_startup(bot: Bot):
     bot.my_username = bot_info.username
 
     await bot.set_my_commands([
+        BotCommand(command="connect", description="Подключиться"),
         BotCommand(command="cabinet", description="Личный кабинет"),
-        BotCommand(command="mykeys", description="Мои ключи"),
-        BotCommand(command="subscription", description="Подписка"),
+        BotCommand(command="faq", description="FAQ"),
         BotCommand(command="referrals", description="Реферальная система"),
         BotCommand(command="support", description="Поддержка"),
         BotCommand(command="start", description="Главное меню"),

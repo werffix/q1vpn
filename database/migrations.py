@@ -11,7 +11,7 @@ from .connection import get_db
 logger = logging.getLogger(__name__)
 
 # Текущая версия схемы БД
-LATEST_VERSION = 9
+LATEST_VERSION = 11
 
 
 def get_current_version() -> int:
@@ -516,6 +516,88 @@ def migration_9(conn: sqlite3.Connection) -> None:
     logger.info("Миграция v9 применена")
 
 
+def migration_10(conn: sqlite3.Connection) -> None:
+    """
+    Миграция v10: Обновление стартового текста и FAQ под новый UX.
+    """
+    logger.info("Применение миграции v10 (Главная + FAQ)...")
+
+    main_page_text = (
+        "⚡️q1 vpn \\- быстрый, безопасный и анонимный доступ к интернету\\.\n\n"
+        "🌐 Использование трафика: ГБ\n\n"
+        "%без\\_тарифов%"
+    )
+    faq_text = (
+        "🔐 Этот бот предоставляет доступ к VPN\\-сервису\\.\n\n"
+        "Подключение занимает всего пару минут\\.\n\n"
+        "Как начать пользоваться VPN\n\n"
+        "1️⃣ Купите ключ\n"
+        "Перейдите в раздел «Оформить подписку» и оформите доступ\\.\n\n"
+        "2️⃣ Нажмите «Подключиться»\n"
+        "Выберите устройство: Android, iOS/MacOS \\(M\\), Windows\\.\n\n"
+        "3️⃣ Скопируйте ключ и вставьте в приложение\n\n"
+        "4️⃣ Подключайтесь и пользуйтесь свободным интернетом 🚀"
+    )
+
+    conn.execute(
+        "UPDATE settings SET value = ? WHERE key = 'main_page_text'",
+        (main_page_text,)
+    )
+    conn.execute(
+        "UPDATE settings SET value = ? WHERE key = 'help_page_text'",
+        (faq_text,)
+    )
+
+    logger.info("Миграция v10 применена")
+
+
+def migration_11(conn: sqlite3.Connection) -> None:
+    """
+    Миграция v11: Финализация UX для старта и FAQ.
+    """
+    logger.info("Применение миграции v11 (Старт + FAQ + ссылки)...")
+
+    main_page_text = (
+        "⚡️q1 vpn \\- быстрый, безопасный и анонимный доступ к интернету\\.\n\n"
+        "🌐 Использование трафика: %traffic_used_gb% ГБ\n\n"
+        "%без\\_тарифов%"
+    )
+    faq_text = (
+        "🔐 Этот бот предоставляет доступ к VPN\\-сервису\\.\n\n"
+        "Подключение занимает всего пару минут\\.\n\n"
+        "Как начать пользоваться VPN\n\n"
+        "1️⃣ Купите ключ\n"
+        "Перейдите в раздел «Купить ключ» и оформите доступ\\.\n\n"
+        "2️⃣ Установите VPN\\-клиент\n"
+        "Скачайте приложение для вашего устройства:\n"
+        "• Hiddify\n"
+        "• Happ\n"
+        "• v2RayTun\n\n"
+        "📖 Подробная инструкция по настройке:\n"
+        "https://telegra\\.ph/Kak\\-nastroit\\-VPN\\-Gajd\\-za\\-2\\-minuty\\-03\\-07\n\n"
+        "3️⃣ Импортируйте ключ\n"
+        "Скопируйте полученный ключ и добавьте его в приложение\\.\n\n"
+        "4️⃣ Подключайтесь\n"
+        "Активируйте соединение и пользуйтесь свободным интернетом 🚀"
+    )
+
+    conn.execute(
+        "UPDATE settings SET value = ? WHERE key = 'main_page_text'",
+        (main_page_text,)
+    )
+    conn.execute(
+        "UPDATE settings SET value = ? WHERE key = 'help_page_text'",
+        (faq_text,)
+    )
+    conn.execute(
+        "UPDATE settings SET value = 'https://t.me/q1_vpn' WHERE key = 'news_channel_link'"
+    )
+    conn.execute(
+        "UPDATE settings SET value = 'https://t.me/q1vpn_support' WHERE key = 'support_channel_link'"
+    )
+    logger.info("Миграция v11 применена")
+
+
 MIGRATIONS = {
     1: migration_1,
     2: migration_2,
@@ -526,6 +608,8 @@ MIGRATIONS = {
     7: migration_7,
     8: migration_8,
     9: migration_9,
+    10: migration_10,
+    11: migration_11,
 }
 
 
