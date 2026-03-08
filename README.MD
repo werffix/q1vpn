@@ -70,8 +70,8 @@ sudo apt update && sudo apt install -y python3-pip git
 ### Шаг 2: Клонирование репозитория
 Скачайте проект с GitHub:
 ```bash
-git clone https://github.com/werffix/1qvpn.git
-cd 1qvpn
+git clone https://github.com/werffix/q1vpn.git
+cd q1vpn
 ```
 
 ### Шаг 3: Установка зависимостей Python
