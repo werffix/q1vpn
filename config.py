@@ -36,7 +36,7 @@ RETRY_CONFIG = {
 
 # Aggregator subscription URL (например: https://my-domain)
 # Если пусто, ссылки формируются напрямую через панель.
-SUBSCRIPTION_AGGREGATOR_URL = os.getenv("SUBSCRIPTION_AGGREGATOR_URL", "https://vpn.cdcult.ru:2096/").rstrip("/")
+SUBSCRIPTION_AGGREGATOR_URL = os.getenv("SUBSCRIPTION_AGGREGATOR_URL", "https://vpn.cdcult.ru:8088/").rstrip("/")
 
 # HTTP endpoint агрегатора подписок (/sub/{token})
 SUBSCRIPTION_AGGREGATOR_HOST = os.getenv("SUBSCRIPTION_AGGREGATOR_HOST", "0.0.0.0")
